@@ -1,5 +1,6 @@
 """Integration tests for the LCM engine."""
 
+import errno
 import gc
 import hashlib
 import json
@@ -23,6 +24,13 @@ from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import externalize_ingest_payload
 from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
+
+
+def _windows_symlink_privilege_error(exc: OSError) -> bool:
+    return sys.platform == "win32" and (
+        exc.errno in {errno.EACCES, errno.EPERM}
+        or getattr(exc, "winerror", None) in {5, 1314}
+    )
 
 
 @pytest.fixture
@@ -26502,7 +26510,7 @@ class TestHandleGrepExternalizedPayloads:
         try:
             (storage / "linked.json").symlink_to(storage / valid_ref)
         except OSError as exc:
-            if sys.platform == "win32":
+            if _windows_symlink_privilege_error(exc):
                 pytest.skip(f"symlink creation unavailable: {exc}")
             raise
 
@@ -26564,7 +26572,7 @@ class TestHandleGrepExternalizedPayloads:
         try:
             link.symlink_to(storage / ref)
         except OSError as exc:
-            if sys.platform == "win32":
+            if _windows_symlink_privilege_error(exc):
                 pytest.skip(f"symlink creation unavailable: {exc}")
             raise
         symlink = json.loads(

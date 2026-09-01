@@ -11,6 +11,7 @@ import stat
 import sys
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -518,6 +519,8 @@ def test_directory_fsync_is_safe_on_windows(tmp_path):
 def test_ingest_payload_names_are_unique_when_clock_does_not_advance(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     monkeypatch.setattr(externalize_module.time, "time_ns", lambda: 123456789)
+    suffixes = iter(("1" * 32, "2" * 32))
+    monkeypatch.setattr(externalize_module.uuid, "uuid4", lambda: SimpleNamespace(hex=next(suffixes)))
     kwargs = {
         "role": "user",
         "session_id": engine.current_session_id,
@@ -532,6 +535,8 @@ def test_ingest_payload_names_are_unique_when_clock_does_not_advance(tmp_path, m
     assert first is not None
     assert second is not None
     assert first["path"] != second["path"]
+    assert Path(first["path"]).stem.endswith("_" + "1" * 16)
+    assert Path(second["path"]).stem.endswith("_" + "2" * 16)
 
 
 def test_externalized_search_prefix_rejects_path_replaced_during_open(tmp_path, monkeypatch):

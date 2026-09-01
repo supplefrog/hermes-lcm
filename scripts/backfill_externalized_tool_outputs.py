@@ -13,7 +13,7 @@ import argparse
 import copy
 import ctypes
 import errno
-import fcntl
+import importlib
 import hashlib
 import json
 import os
@@ -27,6 +27,11 @@ import types
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+
+
+if os.name == "nt":
+    raise SystemExit("historical externalization backfill is POSIX-only")
+fcntl = importlib.import_module("fcntl")
 
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
