@@ -145,6 +145,27 @@ class TestRegistrationGating:
         assert ctx.engine is not None
         assert ctx.engine.name == "lcm"
 
+    def test_registers_engine_shutdown_with_host_unload(self, tmp_path, monkeypatch):
+        module = _load_plugin_module("hermes_lcm_unload_cleanup")
+        callbacks = []
+        db_path = tmp_path / "lcm.db"
+        monkeypatch.setenv("LCM_DATABASE_PATH", str(db_path))
+
+        class _Ctx:
+            def register_context_engine(self, engine):
+                self.engine = engine
+
+            def on_unload(self, callback):
+                callbacks.append(callback)
+
+        ctx = _Ctx()
+        module.register(ctx)
+        assert callbacks == [ctx.engine.shutdown]
+        assert db_path.is_file()
+        callbacks[0]()
+        db_path.unlink()
+        assert not db_path.exists()
+
 
 class TestHermesAgentRegression:
     """Regression: Hermes Agent-shaped hosts must not shadow native LCM routing."""
