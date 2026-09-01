@@ -644,7 +644,9 @@ Payload files are flushed with `fsync` before publication on every supported
 platform. POSIX hosts also flush the parent directory after create or replace.
 Portable Python on Windows cannot open a directory descriptor for `fsync`, so
 Windows retains the file flush and same-volume atomic replace but has weaker
-power-loss durability for the directory entry itself.
+power-loss durability for the directory entry itself. Windows confidentiality
+follows ACL inheritance from `HERMES_HOME`, not POSIX mode bits; review those
+ACLs before storing sensitive payloads.
 
 `lcm_grep` keeps history-only behavior by default. Operators and agents may opt
 into bounded active-session payload search with
