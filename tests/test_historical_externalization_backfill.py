@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,12 @@ import pytest
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.externalize import get_large_output_storage_dir, maybe_externalize_payload
 from hermes_lcm.store import MessageStore
+
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="historical backfill requires POSIX flock, dir_fd, and ownership semantics",
+)
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "backfill_externalized_tool_outputs.py"

@@ -640,6 +640,12 @@ Failure to durably externalize is fail-open: the provider receives the original
 inline payload. Results from `lcm_describe` and `lcm_expand` also stay inline so
 recovery does not recursively create another drilldown step.
 
+Payload files are flushed with `fsync` before publication on every supported
+platform. POSIX hosts also flush the parent directory after create or replace.
+Portable Python on Windows cannot open a directory descriptor for `fsync`, so
+Windows retains the file flush and same-volume atomic replace but has weaker
+power-loss durability for the directory entry itself.
+
 `lcm_grep` keeps history-only behavior by default. Operators and agents may opt
 into bounded active-session payload search with
 `content_scope='externalized'|'both'`; optional `externalized_refs` narrows the
@@ -996,6 +1002,12 @@ host OS and filesystem. Apply and rollback require the storage directory to be
 owned by the current user and not writable by group or other users. They also
 hold an advisory lock on the opened directory so concurrent invocations of this
 script cannot mutate it together.
+
+This historical backfill utility is currently POSIX-only: its safety contract
+requires `flock`, directory file descriptors, POSIX ownership/mode checks, and
+atomic name exchange. Windows live ingest and recovery are supported, but run
+historical backfill from a supported POSIX host rather than weakening those
+operator-safety guarantees.
 
 The command also refuses database schemas newer than this build before scanning
 rows or writing sidecars. Apply failures are recorded in `counts.failed` and

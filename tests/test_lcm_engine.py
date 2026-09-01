@@ -26499,7 +26499,12 @@ class TestHandleGrepExternalizedPayloads:
             json.dumps({"session_id": "foreign-session", "content": "needle"}),
             encoding="utf-8",
         )
-        (storage / "linked.json").symlink_to(storage / valid_ref)
+        try:
+            (storage / "linked.json").symlink_to(storage / valid_ref)
+        except OSError as exc:
+            if sys.platform == "win32":
+                pytest.skip(f"symlink creation unavailable: {exc}")
+            raise
 
         result = json.loads(
             externalized_search_engine.handle_tool_call(
@@ -26556,7 +26561,12 @@ class TestHandleGrepExternalizedPayloads:
         ref = self._externalize(externalized_search_engine, "needle target " * 20)
         storage = Path(externalized_search_engine._hermes_home, "lcm-large-outputs")
         link = storage / "linked.json"
-        link.symlink_to(storage / ref)
+        try:
+            link.symlink_to(storage / ref)
+        except OSError as exc:
+            if sys.platform == "win32":
+                pytest.skip(f"symlink creation unavailable: {exc}")
+            raise
         symlink = json.loads(
             externalized_search_engine.handle_tool_call(
                 "lcm_grep",

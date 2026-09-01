@@ -500,6 +500,40 @@ def test_externalized_payload_write_fsyncs_file_and_parent_directory(tmp_path, m
     assert result["path"].parent in fsynced_dirs
 
 
+def test_directory_fsync_skips_unsupported_platforms(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(externalize_module, "_directory_fsync_supported", lambda: False)
+    monkeypatch.setattr(externalize_module.os, "open", lambda *args: opened.append(args))
+
+    externalize_module._fsync_directory(tmp_path)
+
+    assert opened == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific directory handle behavior")
+def test_directory_fsync_is_safe_on_windows(tmp_path):
+    externalize_module._fsync_directory(tmp_path)
+
+
+def test_ingest_payload_names_are_unique_when_clock_does_not_advance(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    monkeypatch.setattr(externalize_module.time, "time_ns", lambda: 123456789)
+    kwargs = {
+        "role": "user",
+        "session_id": engine.current_session_id,
+        "field_path": "content",
+        "config": engine._config,
+        "hermes_home": str(tmp_path),
+    }
+
+    first = externalize_ingest_payload("same payload", **kwargs)
+    second = externalize_ingest_payload("same payload", **kwargs)
+
+    assert first is not None
+    assert second is not None
+    assert first["path"] != second["path"]
+
+
 def test_externalized_search_prefix_rejects_path_replaced_during_open(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     target = externalize_ingest_payload(
@@ -722,7 +756,8 @@ def test_externalized_payload_reassignment_fsyncs_replacement(tmp_path, monkeypa
     )
 
     assert moved == 1
-    assert len(fsync_calls) >= 3
+    expected_minimum = 3 if externalize_module._directory_fsync_supported() else 1
+    assert len(fsync_calls) >= expected_minimum
     payload = json.loads(result["path"].read_text(encoding="utf-8"))
     assert payload["session_id"] == "new-session"
 
@@ -1263,6 +1298,7 @@ def test_ingest_preserves_inline_payload_when_externalization_fails(tmp_path, mo
     assert _externalized_files(tmp_path) == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits do not represent Windows ACLs")
 def test_externalized_payload_files_are_private(tmp_path):
     engine = _engine(tmp_path)
 

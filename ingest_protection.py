@@ -578,7 +578,22 @@ def recover_hermes_persisted_output_with_file_stat(text: str | None) -> tuple[st
         return None
     recovered, file_stat = recovered_with_stat
     if len(recovered) != expected_chars:
-        return None
+        # Hermes may write an LF-based tool result through Windows text mode,
+        # expanding each newline to CRLF on disk while retaining the original
+        # character count in the marker. Keep the existing fail-closed behavior
+        # on other platforms.
+        if os.name != "nt":
+            return None
+        if any(
+            i == 0 or recovered[i - 1] != chr(13)
+            for i, ch in enumerate(recovered)
+            if ch == chr(10)
+        ):
+            return None
+        normalized = recovered.replace(chr(13) + chr(10), chr(10))
+        if len(normalized) != expected_chars:
+            return None
+        recovered = normalized
     preview_prefix = _persisted_output_preview_prefix(text)
     if not preview_prefix or not recovered.startswith(preview_prefix):
         return None

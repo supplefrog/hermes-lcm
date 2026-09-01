@@ -17,6 +17,7 @@ import os
 import re
 import stat
 import time
+import uuid
 from pathlib import Path
 from typing import Any, BinaryIO, Dict
 
@@ -50,13 +51,33 @@ def _content_digest_prefix(content: str) -> str:
     return hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:12]
 
 
+def _unique_file_suffix() -> str:
+    # Keep references short enough that an embedded placeholder stays below the
+    # default externalization threshold; 64 random bits also avoid coarse-clock
+    # collisions on Windows.
+    return uuid.uuid4().hex[:16]
+
+
 def _preview_sha256(preview_prefix: Any) -> str:
     if not preview_prefix:
         return ""
     return hashlib.sha256(str(preview_prefix).encode("utf-8")).hexdigest()
 
 
+def _directory_fsync_supported() -> bool:
+    """Return whether Python can open directory descriptors for ``fsync``.
+
+    Windows' CRT rejects ``os.open(directory, os.O_RDONLY)`` with EACCES.
+    Payload files are still flushed with ``os.fsync`` before publication, and
+    same-volume replacement remains atomic, but portable Python exposes no
+    equivalent parent-directory flush on Windows.
+    """
+    return os.name != "nt"
+
+
 def _fsync_directory(path: Path) -> None:
+    if not _directory_fsync_supported():
+        return
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
@@ -167,7 +188,7 @@ def _write_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _replace_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
-    tmp_path = path.with_name(f"{path.name}.{time.time_ns():x}.tmp")
+    tmp_path = path.with_name(f"{path.name}.{_unique_file_suffix()}.tmp")
     try:
         _write_externalized_payload(tmp_path, payload)
         tmp_path.replace(path)
@@ -1088,7 +1109,7 @@ def externalize_ingest_payload(
 
     digest_prefix = _content_digest_prefix(content)
     timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
-    unique_suffix = f"{time.time_ns():x}"
+    unique_suffix = _unique_file_suffix()
     kind_stub = _safe_stub(kind, "ingest_payload")
     field_stub = re.sub(r"[^A-Za-z0-9_.-]+", "-", field_path or "payload")[:48]
     filename = f"{timestamp}_{kind_stub}_{field_stub}_{digest_prefix}_{unique_suffix}.json"
@@ -1206,7 +1227,7 @@ def maybe_externalize_payload(
 
     digest_prefix = _content_digest_prefix(content)
     timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
-    unique_suffix = f"{time.time_ns():x}"
+    unique_suffix = _unique_file_suffix()
     if kind == "tool_result":
         # Keep the original filename shape for compatibility with existing
         # externalized tool-output stores and tests.

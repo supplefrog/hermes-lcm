@@ -10,6 +10,14 @@ import subprocess
 import sys
 import types
 
+import pytest
+
+
+POSIX_SHELL_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Bash release/install scripts and symlink semantics are POSIX-only",
+)
+
 
 EXPECTED_LCM_TOOLS = {
     "lcm_grep",
@@ -166,6 +174,7 @@ def test_validate_release_routes_cache_artifacts_outside_checkout():
     assert "ulimit -n 1024 &&" not in validate_script
 
 
+@POSIX_SHELL_ONLY
 def test_validate_release_checks_committed_pr_diff_against_origin_main(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     source_script = repo_root / "scripts" / "validate_release.sh"
@@ -209,6 +218,7 @@ def test_validate_release_checks_committed_pr_diff_against_origin_main(tmp_path)
     assert "diff_check_range: origin/main...HEAD" in checklist.read_text(encoding="utf-8")
 
 
+@POSIX_SHELL_ONLY
 def test_validate_release_checks_last_commit_when_origin_main_missing(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     source_script = repo_root / "scripts" / "validate_release.sh"
@@ -258,6 +268,7 @@ def test_plugin_manifest_lists_all_registered_tools():
         assert f"  - {tool_name}\n" in manifest
 
 
+@POSIX_SHELL_ONLY
 def test_install_script_creates_profile_aware_symlink_and_prints_activation_steps(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
@@ -290,6 +301,7 @@ def test_install_script_creates_profile_aware_symlink_and_prints_activation_step
     assert str(skill_target) in result.stdout
 
 
+@POSIX_SHELL_ONLY
 def test_install_script_is_idempotent_for_plugin_and_skill_links(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
@@ -314,6 +326,7 @@ def test_install_script_is_idempotent_for_plugin_and_skill_links(tmp_path):
     ).resolve()
 
 
+@POSIX_SHELL_ONLY
 def test_install_script_preflights_skill_conflict_before_creating_plugin_link(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
@@ -338,6 +351,7 @@ def test_install_script_preflights_skill_conflict_before_creating_plugin_link(tm
     assert not (hermes_home / "plugins" / "hermes-lcm").exists()
 
 
+@POSIX_SHELL_ONLY
 def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
@@ -369,6 +383,7 @@ def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_pa
     assert skill_target.resolve() == (checkout / "skills" / "hermes-lcm").resolve()
 
 
+@POSIX_SHELL_ONLY
 def test_install_script_refuses_to_replace_existing_non_symlink_path(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
