@@ -10,6 +10,7 @@ late source-hash compare-and-swap, and query only source-valid assertions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
 import hashlib
 import json
 import math
@@ -212,6 +213,15 @@ def _bounded_probability(value: float | None, field: str) -> float | None:
     return result
 
 
+def _serialized_connection_read(method):
+    """Keep public reads outside another thread's unfinished publication."""
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+    return serialized
+
+
 class AssertionStore:
     """SQLite assertion store bound to the same physical DB as ``MessageStore``."""
 
@@ -291,8 +301,10 @@ class AssertionStore:
             if conn is None:
                 return
             try:
-                if not self.read_only:
-                    conn.commit()
+                # Completed public writes commit before returning. Any open
+                # transaction here is unfinished work, never a shutdown publish.
+                if conn.in_transaction:
+                    conn.rollback()
             finally:
                 conn.close()
                 self._conn = None  # type: ignore[assignment]
@@ -339,12 +351,14 @@ class AssertionStore:
             content_sha256=_sha256_text(content),
         )
 
+    @_serialized_connection_read
     def snapshot_source(self, store_id: int) -> SourceSnapshot:
         row = self._source_row(store_id)
         if row is None:
             raise KeyError(f"message store_id {store_id} does not exist")
         return self._snapshot_from_row(row)
 
+    @_serialized_connection_read
     def has_current_receipt(
         self,
         snapshot: SourceSnapshot,
@@ -363,6 +377,7 @@ class AssertionStore:
             (snapshot.store_id, version, snapshot.content_sha256),
         ).fetchone() is not None
 
+    @_serialized_connection_read
     def plan_rebuild(
         self,
         *,
@@ -567,8 +582,10 @@ class AssertionStore:
         relation_ids = tuple(str(row["relation_id"]) for row in relation_rows)
 
         with self._write_lock:
-            self._begin_write()
+            if self._conn.in_transaction:
+                raise AssertionStoreError("connection already has an active transaction")
             try:
+                self._begin_write()
                 current_row = self._source_row(snapshot.store_id)
                 if current_row is None:
                     raise AssertionSourceStaleError(
@@ -740,8 +757,9 @@ class AssertionStore:
                         {**row, "created_at": time.time()},
                     )
                 self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
                 raise
 
         return PublishResult(
@@ -777,6 +795,7 @@ class AssertionStore:
         if current_content[start:end] != quote:
             raise AssertionSourceStaleError(f"active {label} span changed")
 
+    @_serialized_connection_read
     def query_assertions(
         self,
         *,
@@ -876,6 +895,7 @@ class AssertionStore:
             output.append(item)
         return output
 
+    @_serialized_connection_read
     def query_relations(
         self,
         *,
@@ -1048,8 +1068,10 @@ class AssertionStore:
         if timestamp is None:
             timestamp = time.time()
         with self._write_lock:
-            self._begin_write()
+            if self._conn.in_transaction:
+                raise AssertionStoreError("connection already has an active transaction")
             try:
+                self._begin_write()
                 cursor = self._conn.execute(
                     """
                     UPDATE lcm_assertion_sources
@@ -1061,8 +1083,9 @@ class AssertionStore:
                 changed = int(cursor.rowcount or 0)
                 self._conn.execute("COMMIT")
                 return changed
-            except Exception:
-                self._conn.execute("ROLLBACK")
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
                 raise
 
     def remove_version(self, extraction_version: str) -> dict[str, int]:
@@ -1070,8 +1093,10 @@ class AssertionStore:
         self._require_writable()
         version = _validated_version(extraction_version)
         with self._write_lock:
-            self._begin_write()
+            if self._conn.in_transaction:
+                raise AssertionStoreError("connection already has an active transaction")
             try:
+                self._begin_write()
                 counts = {
                     "sources": int(self._conn.execute(
                         "SELECT COUNT(*) FROM lcm_assertion_sources WHERE extraction_version = ?",
@@ -1093,6 +1118,7 @@ class AssertionStore:
                 )
                 self._conn.execute("COMMIT")
                 return counts
-            except Exception:
-                self._conn.execute("ROLLBACK")
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
                 raise

@@ -563,9 +563,6 @@ def register(ctx):
     # existing _ingest_messages cursor prevents duplicates if compress() runs
     # later the same turn.
     try:
-        from hermes_cli.plugins import get_plugin_manager as _get_pm
-        _mgr = _get_pm()
-
         def _on_post_llm_call(**kwargs):
             history = kwargs.get("conversation_history")
             if not history:
@@ -607,7 +604,15 @@ def register(ctx):
             except Exception as exc:
                 logger.debug("LCM post_llm_call ingest error: %s", exc)
 
-        _mgr._hooks.setdefault("post_llm_call", []).append(_on_post_llm_call)
+        if callable(register_hook):
+            register_hook("post_llm_call", _on_post_llm_call)
+        else:
+            # Compatibility for older Hermes hosts without PluginContext hook
+            # ownership. Current hosts use register_hook so unload can remove
+            # the exact callback through the plugin registration ledger.
+            from hermes_cli.plugins import get_plugin_manager as _get_pm
+            _mgr = _get_pm()
+            _mgr._hooks.setdefault("post_llm_call", []).append(_on_post_llm_call)
         logger.debug("LCM registered post_llm_call hook for per-turn ingest")
     except Exception as exc:
         logger.debug("LCM could not register post_llm_call hook: %s", exc)

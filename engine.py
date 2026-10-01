@@ -3233,21 +3233,23 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         *,
         conversation_id: str | None = None,
     ) -> Optional[int]:
-        try:
-            stored_messages = self._store.get_range(
-                session_id,
-                limit=max(1, len(messages)),
-                conversation_id=conversation_id,
-            )
-        except Exception:
-            logger.debug("LCM session-end prefix check failed", exc_info=True)
-            return None
+        # Durable rows omit ignored messages. Keep their host-list positions
+        # so the returned append boundary still indexes the original callback.
+        retained = [
+            (idx, msg) for idx, msg in enumerate(messages)
+            if not self._matches_ignore_message_patterns(msg)
+        ]
+        stored_messages = self._store.get_range(
+            session_id,
+            limit=max(1, len(retained)),
+            conversation_id=conversation_id,
+        )
         if not stored_messages:
             return 0
-        if len(messages) < len(stored_messages):
+        if len(retained) < len(stored_messages):
             return None
         for idx, stored_msg in enumerate(stored_messages):
-            msg = messages[idx]
+            msg = retained[idx][1]
             try:
                 message_identity = self._session_end_prefix_compare_identity(
                     msg,
@@ -3262,7 +3264,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 return None
             if message_identity != stored_identity:
                 return None
-        return len(stored_messages)
+        return retained[len(stored_messages) - 1][0] + 1
 
     @staticmethod
     def _lcm_bypass_message_fingerprint(message: Dict[str, Any]) -> str:
@@ -3454,6 +3456,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        # Cover identity/prefix reads as well as writes. This bounds each SQLite
+        # busy wait, not Python locks, normalization, or the whole callback.
+        try:
+            with _temporary_sqlite_busy_timeout(
+                [getattr(self._store, "_conn", None), getattr(self._lifecycle, "_conn", None)],
+                _SESSION_END_BUSY_TIMEOUT_MS,
+            ):
+                self._on_session_end_with_short_sqlite_wait(session_id, messages)
+        except KeyboardInterrupt:
+            logger.warning("LCM session-end interrupted during identity/flush; final messages may be absent")
+        except Exception as exc:
+            if not _is_sqlite_locked_error(exc):
+                raise
+            logger.warning("LCM session-end skipped due to SQLite lock during identity/flush; final messages may be absent")
+
+    def _on_session_end_with_short_sqlite_wait(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
         active_auxiliary_end = session_id in self._active_auxiliary_session_ids()
         if (
@@ -3582,6 +3600,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             and (
                 self._has_lcm_bypass_lineage_session(session_id)
                 or off_current_auxiliary_reused_normal
+                # Ordinary delayed ends need the same explicit session-scoped
+                # writer; the foreground cursor belongs to the current binding.
+                or bool(self._lcm_session_last_normal_conversation_id.get(session_id))
             )
         )
         off_current_normal_conversation_id = (
@@ -3617,16 +3638,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         off_current_store_prefix_for_append = int(off_current_store_prefix_count or 0)
         off_current_recorded_prefix_for_append = 0
         if off_current_recorded_prefix_count > 0 and off_current_normal_conversation_id:
-            try:
-                stored_normal_rows = self._store.get_range(
-                    session_id,
-                    limit=off_current_recorded_prefix_count + 1,
-                    conversation_id=off_current_normal_conversation_id,
-                )
-            except Exception:
-                logger.debug("LCM off-current recorded-prefix row-count probe failed", exc_info=True)
-                stored_normal_rows = []
-            if len(stored_normal_rows) == off_current_recorded_prefix_count:
+            retained_prefix_count = sum(
+                not self._matches_ignore_message_patterns(msg)
+                for msg in messages[:off_current_recorded_prefix_count]
+            )
+            stored_normal_rows = self._store.get_range(
+                session_id,
+                limit=retained_prefix_count + 1,
+                conversation_id=off_current_normal_conversation_id,
+            )
+            if len(stored_normal_rows) == retained_prefix_count:
                 off_current_recorded_prefix_for_append = off_current_recorded_prefix_count
         off_current_strongest_normal_prefix_count = max(
             off_current_store_prefix_for_append if off_current_store_prefix_positive else 0,
@@ -3660,7 +3681,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             off_current_lineage
             and not off_current_auxiliary_reused_normal
             and off_current_normal_conversation_id
-            and off_current_store_prefix_count == 0
+            and (off_current_store_prefix_count == 0 or not messages)
             and off_current_bypass_prefix_count <= 0
             and self._lcm_session_last_bypassed.get(session_id) is False
         ):
@@ -3686,27 +3707,53 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if off_current_prefix_count is not None:
             prefix_count = off_current_prefix_count
             suffix = messages[prefix_count:]
-            if suffix:
-                self._append_off_current_session_end_suffix(
-                    session_id,
-                    suffix,
-                    source=(
-                        self._lcm_session_last_normal_platform.get(session_id)
-                        or self._lcm_session_last_platform.get(session_id, self._session_platform)
-                    ),
-                    conversation_id=off_current_normal_conversation_id,
-                )
             try:
-                state = self._lifecycle.get_by_conversation(off_current_normal_conversation_id)
-                frontier_store_id = state.current_frontier_store_id if state is not None else 0
-                self._lifecycle.finalize_session(
-                    off_current_normal_conversation_id,
-                    session_id,
-                    frontier_store_id=frontier_store_id,
-                )
-            except Exception:
-                logger.debug("LCM off-current session-end lifecycle finalization failed", exc_info=True)
+                with _temporary_sqlite_busy_timeout(
+                    [getattr(self._store, "_conn", None), getattr(self._lifecycle, "_conn", None)],
+                    _SESSION_END_BUSY_TIMEOUT_MS,
+                ):
+                    if suffix:
+                        self._append_off_current_session_end_suffix(
+                            session_id,
+                            suffix,
+                            source=(
+                                self._lcm_session_last_normal_platform.get(session_id)
+                                or self._lcm_session_last_platform.get(session_id, "")
+                            ),
+                            conversation_id=off_current_normal_conversation_id,
+                        )
+                    # A conversation may already belong to a newer session.
+                    # Inspect/finalize under the native lifecycle RLock so this
+                    # instance cannot copy that session's frontier onto this end.
+                    with self._lifecycle._lock:
+                        state = self._lifecycle.get_by_conversation(off_current_normal_conversation_id)
+                        if state is not None and (
+                            state.current_session_id == session_id
+                            or (state.current_session_id is None and state.last_finalized_session_id == session_id)
+                        ):
+                            frontier_store_id = (
+                                state.current_frontier_store_id
+                                if state.current_session_id == session_id
+                                else state.last_finalized_frontier_store_id
+                            )
+                            self._lifecycle.finalize_session(
+                                off_current_normal_conversation_id,
+                                session_id,
+                                frontier_store_id=frontier_store_id,
+                            )
+            except KeyboardInterrupt:
+                logger.warning("LCM off-current session-end flush interrupted; final messages may be absent")
+            except Exception as exc:
+                if not _is_sqlite_locked_error(exc):
+                    raise
+                logger.warning("LCM off-current session-end flush skipped due to SQLite lock; final messages may be absent")
             return
+        if (
+            off_current_should_bypass
+            and off_current_normal_conversation_id
+            and not self._has_lcm_bypass_lineage_session(session_id)
+        ):
+            logger.warning("LCM rejected delayed normal session-end for %s: no matching stored prefix", session_id)
         if (
             current_session_bypasses
             or same_id_should_bypass
@@ -3718,6 +3765,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 session_id,
                 messages,
                 current_session_bypasses=current_session_bypasses,
+            )
+            return
+        if session_id != self._session_id:
+            logger.warning(
+                "LCM ignored off-current session-end with unresolved identity for %s",
+                session_id,
             )
             return
         try:
